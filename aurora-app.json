@@ -1,0 +1,8 @@
+{
+  "packageName": "com.chanuta.template",
+  "name": "שם האפליקציה בעברית",
+  "name_en": "App Name in English",
+  "category": "כלים",
+  "description": "תיאור קצר של האפליקציה ומה היא עושה עבור המשתמש.",
+  "author": "chanuta-dev"
+}

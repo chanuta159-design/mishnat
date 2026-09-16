@@ -1,0 +1,90 @@
+name: Build, Release & Notify Store
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Release APK
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Locate APK File
+        id: apk_info
+        run: |
+          APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "Error: Release APK not found!"
+            exit 1
+          fi
+          APK_NAME=$(basename "$APK_PATH")
+          APK_SIZE=$(stat -c%s "$APK_PATH")
+          echo "path=$APK_PATH" >> $GITHUB_OUTPUT
+          echo "name=$APK_NAME" >> $GITHUB_OUTPUT
+          echo "size=$APK_SIZE" >> $GITHUB_OUTPUT
+          echo "Found APK: $APK_NAME ($APK_SIZE bytes)"
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.apk_info.outputs.path }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+      - name: Notify Aurora Whitelist Dashboard
+        if: success()
+        run: |
+          MANIFEST_CONTENT=$(cat aurora-app.json)
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.apk_info.outputs.name }}"
+          ICON_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/icon.png"
+
+          PAYLOAD=$(jq -n \
+            --arg repo "${{ github.repository }}" \
+            --arg tag "${{ github.ref_name }}" \
+            --arg apkUrl "$DOWNLOAD_URL" \
+            --argjson apkSize "${{ steps.apk_info.outputs.size }}" \
+            --arg iconUrl "$ICON_URL" \
+            --argjson manifest "$MANIFEST_CONTENT" \
+            '{
+              repo: $repo,
+              version: $tag,
+              apkUrl: $apkUrl,
+              apkSize: $apkSize,
+              iconUrl: $iconUrl,
+              manifest: $manifest
+            }')
+
+          echo "Dispatching registration to Aurora Whitelist Dashboard..."
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST https://aurora-whitelist-chi.vercel.app/api/register-app \
+               -H "Content-Type: application/json" \
+               -d "$PAYLOAD")
+
+          echo "Response status from Dashboard API: $HTTP_STATUS"
+          if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+            echo "Warning: Dashboard notification returned status $HTTP_STATUS"
+          else
+            echo "Successfully registered with Aurora Whitelist Dashboard!"
+          fi
