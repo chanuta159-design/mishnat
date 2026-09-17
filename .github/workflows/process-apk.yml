@@ -16,12 +16,24 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Resolve Release Tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="${{ github.event.release.tag_name }}"
+          if [ -z "$TAG_NAME" ]; then
+            echo "Tag name not in event, fetching latest release tag..."
+            TAG_NAME=$(gh release view --json tagName -q .tagName)
+          fi
+          echo "Using release tag: $TAG_NAME"
+          echo "tag_name=$TAG_NAME" >> $GITHUB_ENV
+
       - name: Download Release APK
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Fetching APK from the release..."
-          gh release download ${{ github.event.release.tag_name }} --pattern "*.apk" --dir ./incoming_apk/
+          echo "Fetching APK from release $tag_name..."
+          gh release download "$tag_name" --pattern "*.apk" --dir ./incoming_apk/
           APK_PATH=$(find ./incoming_apk -name "*.apk" | head -n 1)
           if [ -z "$APK_PATH" ]; then
             echo "Error: No APK file found in this release!"
@@ -32,17 +44,14 @@ jobs:
 
       - name: Extract Metadata with AAPT
         run: |
-          # איתור כלי ה-aapt של גוגל המותקן בסביבת הבילד
           AAPT_BIN=$(find $ANDROID_HOME/build-tools -name aapt | sort -V | tail -n 1)
           echo "Using AAPT at: $AAPT_BIN"
 
           BADGING_OUTPUT=$($AAPT_BIN dump badging "$apk_path")
 
-          # 1. חילוץ Package Name וגרסה
           PKG_NAME=$(echo "$BADGING_OUTPUT" | grep -m 1 "package: name=" | sed -E "s/.*name='([^']+)'.*/\1/")
           VER_NAME=$(echo "$BADGING_OUTPUT" | grep -m 1 "versionName=" | sed -E "s/.*versionName='([^']+)'.*/\1/")
           
-          # 2. חילוץ שם האפליקציה (תווית)
           APP_LABEL=$(echo "$BADGING_OUTPUT" | grep -m 1 "application-label:" | sed -E "s/.*application-label:'([^']+)'.*/\1/")
           if [ -z "$APP_LABEL" ]; then
             APP_LABEL=$(echo "$BADGING_OUTPUT" | grep -m 1 "application: label=" | sed -E "s/.*label='([^']+)'.*/\1/")
@@ -51,7 +60,6 @@ jobs:
             APP_LABEL="$PKG_NAME"
           fi
 
-          # 3. איתור נתיב האייקון הגדול ביותר בתוך ה-APK
           ICON_PATH=$(echo "$BADGING_OUTPUT" | grep -E "application-icon-[0-9]+:" | sort -V | tail -n 1 | sed -E "s/.*'([^']+)'.*/\1/")
           if [ -z "$ICON_PATH" ]; then
             ICON_PATH=$(echo "$BADGING_OUTPUT" | grep -m 1 "icon=" | sed -E "s/.*icon='([^']+)'.*/\1/")
@@ -71,13 +79,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          ICON_URL=""
           if [ -n "$icon_internal_path" ]; then
             echo "Extracting icon from APK..."
             unzip -p "$apk_path" "$icon_internal_path" > ./app_icon.png
             if [ -s ./app_icon.png ]; then
               echo "Icon extracted successfully. Uploading as release asset..."
-              gh release upload ${{ github.event.release.tag_name }} ./app_icon.png --clobber
-              ICON_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.event.release.tag_name }}/app_icon.png"
+              gh release upload "$tag_name" ./app_icon.png --clobber
+              ICON_URL="https://github.com/${{ github.repository }}/releases/download/$tag_name/app_icon.png"
             fi
           fi
           echo "icon_download_url=$ICON_URL" >> $GITHUB_ENV
@@ -86,7 +95,7 @@ jobs:
         run: |
           APK_NAME=$(basename "$apk_path")
           APK_SIZE=$(stat -c%s "$apk_path")
-          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.event.release.tag_name }}/$APK_NAME"
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/$tag_name/$APK_NAME"
 
           PAYLOAD=$(jq -n \
             --arg repo "${{ github.repository }}" \
