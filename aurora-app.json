@@ -1,8 +1,8 @@
 {
-  "packageName": "com.chanuta.template",
-  "name": "שם האפליקציה בעברית",
-  "name_en": "App Name in English",
+  "packageName": "com.app.mishnat",
+  "name": "משנת יוסף",
+  "name_en": "משנת יוסף",
   "category": "כלים",
-  "description": "תיאור קצר של האפליקציה ומה היא עושה עבור המשתמש.",
-  "author": "chanuta-dev"
+  "description": "אפליקציה עצמאית שהועלתה לחנות",
+  "author": "chanuta159-design"
 }
