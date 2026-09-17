@@ -1,0 +1,119 @@
+name: Auto-Extract & Register APK
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  inspect-and-register:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download Release APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Fetching APK from the release..."
+          gh release download ${{ github.event.release.tag_name }} --pattern "*.apk" --dir ./incoming_apk/
+          APK_PATH=$(find ./incoming_apk -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "Error: No APK file found in this release!"
+            exit 1
+          fi
+          echo "apk_path=$APK_PATH" >> $GITHUB_ENV
+          echo "Found APK: $APK_PATH"
+
+      - name: Extract Metadata with AAPT
+        run: |
+          # איתור כלי ה-aapt של גוגל המותקן בסביבת הבילד
+          AAPT_BIN=$(find $ANDROID_HOME/build-tools -name aapt | sort -V | tail -n 1)
+          echo "Using AAPT at: $AAPT_BIN"
+
+          BADGING_OUTPUT=$($AAPT_BIN dump badging "$apk_path")
+
+          # 1. חילוץ Package Name וגרסה
+          PKG_NAME=$(echo "$BADGING_OUTPUT" | grep -m 1 "package: name=" | sed -E "s/.*name='([^']+)'.*/\1/")
+          VER_NAME=$(echo "$BADGING_OUTPUT" | grep -m 1 "versionName=" | sed -E "s/.*versionName='([^']+)'.*/\1/")
+          
+          # 2. חילוץ שם האפליקציה (תווית)
+          APP_LABEL=$(echo "$BADGING_OUTPUT" | grep -m 1 "application-label:" | sed -E "s/.*application-label:'([^']+)'.*/\1/")
+          if [ -z "$APP_LABEL" ]; then
+            APP_LABEL=$(echo "$BADGING_OUTPUT" | grep -m 1 "application: label=" | sed -E "s/.*label='([^']+)'.*/\1/")
+          fi
+          if [ -z "$APP_LABEL" ]; then
+            APP_LABEL="$PKG_NAME"
+          fi
+
+          # 3. איתור נתיב האייקון הגדול ביותר בתוך ה-APK
+          ICON_PATH=$(echo "$BADGING_OUTPUT" | grep -E "application-icon-[0-9]+:" | sort -V | tail -n 1 | sed -E "s/.*'([^']+)'.*/\1/")
+          if [ -z "$ICON_PATH" ]; then
+            ICON_PATH=$(echo "$BADGING_OUTPUT" | grep -m 1 "icon=" | sed -E "s/.*icon='([^']+)'.*/\1/")
+          fi
+
+          echo "Extracted Package: $PKG_NAME"
+          echo "Extracted Label: $APP_LABEL"
+          echo "Extracted Version: $VER_NAME"
+          echo "Extracted Icon Path: $ICON_PATH"
+
+          echo "pkg_name=$PKG_NAME" >> $GITHUB_ENV
+          echo "app_label=$APP_LABEL" >> $GITHUB_ENV
+          echo "ver_name=$VER_NAME" >> $GITHUB_ENV
+          echo "icon_internal_path=$ICON_PATH" >> $GITHUB_ENV
+
+      - name: Extract Icon and Attach to Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "$icon_internal_path" ]; then
+            echo "Extracting icon from APK..."
+            unzip -p "$apk_path" "$icon_internal_path" > ./app_icon.png
+            if [ -s ./app_icon.png ]; then
+              echo "Icon extracted successfully. Uploading as release asset..."
+              gh release upload ${{ github.event.release.tag_name }} ./app_icon.png --clobber
+              ICON_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.event.release.tag_name }}/app_icon.png"
+            fi
+          fi
+          echo "icon_download_url=$ICON_URL" >> $GITHUB_ENV
+
+      - name: Notify Aurora Whitelist Dashboard
+        run: |
+          APK_NAME=$(basename "$apk_path")
+          APK_SIZE=$(stat -c%s "$apk_path")
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.event.release.tag_name }}/$APK_NAME"
+
+          PAYLOAD=$(jq -n \
+            --arg repo "${{ github.repository }}" \
+            --arg version "${{ env.ver_name }}" \
+            --arg apkUrl "$DOWNLOAD_URL" \
+            --argjson apkSize "$APK_SIZE" \
+            --arg iconUrl "${{ env.icon_download_url }}" \
+            --arg pkg "${{ env.pkg_name }}" \
+            --arg name "${{ env.app_label }}" \
+            '{
+              repo: $repo,
+              version: $version,
+              apkUrl: $apkUrl,
+              apkSize: $apkSize,
+              iconUrl: $iconUrl,
+              manifest: {
+                packageName: $pkg,
+                name: $name,
+                category: "כלים",
+                description: "אפליקציה עצמאית שהועלתה לחנות"
+              }
+            }')
+
+          echo "Sending extracted metadata to Aurora Whitelist Dashboard..."
+          curl -s -X POST https://aurora-whitelist-chi.vercel.app/api/register-app \
+               -H "Content-Type: application/json" \
+               -d "$PAYLOAD"
+          
+          echo ""
+          echo "Registration completed successfully!"
