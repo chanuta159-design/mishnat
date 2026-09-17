@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Resolve Release Tag
         env:
@@ -49,20 +51,24 @@ jobs:
 
           BADGING_OUTPUT=$($AAPT_BIN dump badging "$apk_path")
 
-          PKG_NAME=$(echo "$BADGING_OUTPUT" | grep -m 1 "package: name=" | sed -E "s/.*name='([^']+)'.*/\1/")
-          VER_NAME=$(echo "$BADGING_OUTPUT" | grep -m 1 "versionName=" | sed -E "s/.*versionName='([^']+)'.*/\1/")
+          # חילוץ מדויק של ה-Package Name והגרסה
+          PKG_NAME=$(echo "$BADGING_OUTPUT" | grep -m 1 "^package: name=" | awk -F"'" '{print $2}')
+          VER_NAME=$(echo "$BADGING_OUTPUT" | grep -m 1 "versionName=" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
           
-          APP_LABEL=$(echo "$BADGING_OUTPUT" | grep -m 1 "application-label:" | sed -E "s/.*application-label:'([^']+)'.*/\1/")
+          # חילוץ שם האפליקציה (תווית)
+          APP_LABEL=$(echo "$BADGING_OUTPUT" | grep -m 1 "^application-label:" | sed -n "s/.*application-label:'\([^']*\)'.*/\1/p")
           if [ -z "$APP_LABEL" ]; then
-            APP_LABEL=$(echo "$BADGING_OUTPUT" | grep -m 1 "application: label=" | sed -E "s/.*label='([^']+)'.*/\1/")
+            APP_LABEL=$(echo "$BADGING_OUTPUT" | grep -m 1 "^application: label=" | sed -n "s/.*label='\([^']*\)'.*/\1/p")
           fi
           if [ -z "$APP_LABEL" ]; then
             APP_LABEL="$PKG_NAME"
           fi
 
-          ICON_PATH=$(echo "$BADGING_OUTPUT" | grep -E "application-icon-[0-9]+:" | sort -V | tail -n 1 | sed -E "s/.*'([^']+)'.*/\1/")
+          # איתור קובץ אייקון PNG בלבד (מתעלם מקובצי xml)
+          ICON_PATH=$(echo "$BADGING_OUTPUT" | grep -o "res/.*\.png" | sort -V | tail -n 1)
           if [ -z "$ICON_PATH" ]; then
-            ICON_PATH=$(echo "$BADGING_OUTPUT" | grep -m 1 "icon=" | sed -E "s/.*icon='([^']+)'.*/\1/")
+            # גיבוי: חיפוש ישיר בתוך ה-APK
+            ICON_PATH=$(unzip -l "$apk_path" | grep -o "res/.*ic_launcher.*\.png" | sort -V | tail -n 1)
           fi
 
           echo "Extracted Package: $PKG_NAME"
@@ -81,15 +87,37 @@ jobs:
         run: |
           ICON_URL=""
           if [ -n "$icon_internal_path" ]; then
-            echo "Extracting icon from APK..."
-            unzip -p "$apk_path" "$icon_internal_path" > ./app_icon.png
-            if [ -s ./app_icon.png ]; then
+            echo "Extracting PNG icon from APK..."
+            unzip -p "$apk_path" "$icon_internal_path" > ./icon.png
+            if [ -s ./icon.png ]; then
               echo "Icon extracted successfully. Uploading as release asset..."
-              gh release upload "$tag_name" ./app_icon.png --clobber
-              ICON_URL="https://github.com/${{ github.repository }}/releases/download/$tag_name/app_icon.png"
+              gh release upload "$tag_name" ./icon.png --clobber
+              ICON_URL="https://github.com/${{ github.repository }}/releases/download/$tag_name/icon.png"
             fi
           fi
           echo "icon_download_url=$ICON_URL" >> $GITHUB_ENV
+
+      - name: Save aurora-app.json into Repository
+        run: |
+          cat <<EOF > aurora-app.json
+          {
+            "packageName": "$pkg_name",
+            "name": "$app_label",
+            "name_en": "$app_label",
+            "category": "כלים",
+            "description": "אפליקציה עצמאית שהועלתה לחנות",
+            "author": "${{ github.repository_owner }}"
+          }
+          EOF
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add aurora-app.json
+          if [ -f icon.png ]; then
+            git add icon.png
+          fi
+          git commit -m "Auto-generate aurora-app.json and icon from APK" || echo "No changes to commit"
+          git push origin main || echo "Push skipped"
 
       - name: Notify Aurora Whitelist Dashboard
         run: |
