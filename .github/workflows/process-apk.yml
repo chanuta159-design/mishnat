@@ -84,7 +84,6 @@ jobs:
           with zipfile.ZipFile(apk_path, 'r') as z:
               names = z.namelist()
 
-              # 1. איתור קובצי תמונה במשאבי האפליקציה
               candidates = [n for n in names if re.search(r'^res/(mipmap|drawable).*\.(png|webp|jpg)$', n, re.I)]
               candidates = [n for n in candidates if 'background' not in n.lower()]
 
@@ -93,7 +92,6 @@ jobs:
                   best = candidates
 
               if best:
-                  # דירוג לפי איכות ורזולוציה מקסימלית
                   def priority(name):
                       score = 0
                       if 'xxxhdpi' in name: score += 50
@@ -111,13 +109,12 @@ jobs:
                   with open("temp_raw_icon", "wb") as f:
                       f.write(z.read(chosen))
 
-                  # 2. חיתוך שוליים אוטומטי (Auto-Crop) ומתיחה לגודל חנות מלא
                   try:
                       with Image.open("temp_raw_icon") as img:
                           img = img.convert("RGBA")
                           alpha = img.split()[-1]
                           
-                          # סינון שקיפות וצלליות חלשות (שומר רק תוכן עם שקיפות מעל 25)
+                          # חיתוך שוליים שקופים וצלליות מיותרות
                           mask = alpha.point(lambda p: 255 if p > 25 else 0)
                           bbox = mask.getbbox()
 
@@ -126,18 +123,16 @@ jobs:
                               w, h = cropped.size
                               max_dim = max(w, h)
                               
-                              # ריבוע הקנבס ומירכוז
                               square_img = Image.new("RGBA", (max_dim, max_dim), (0, 0, 0, 0))
                               square_img.paste(cropped, ((max_dim - w) // 2, (max_dim - h) // 2))
 
-                              # מתיחה ל-512x512 תקני של Google Play
                               final_icon = square_img.resize((512, 512), Image.Resampling.LANCZOS)
                               final_icon.save("icon.png", "PNG")
-                              print(f"Auto-crop succeeded! Bounding box: {bbox} -> Resized to 512x512")
+                              print(f"Auto-crop succeeded! Resized to 512x512")
                           else:
                               img.resize((512, 512), Image.Resampling.LANCZOS).save("icon.png", "PNG")
                   except Exception as e:
-                      print(f"Image processing error: {e}, falling back to direct save")
+                      print(f"Image processing error: {e}, using original image")
                       os.rename("temp_raw_icon", "icon.png")
 
                   if os.path.exists("temp_raw_icon"):
@@ -148,7 +143,7 @@ jobs:
                   print("No suitable icon image found in APK.")
           EOF
 
-      - name: Upload Icon to Release Assets
+      - name: Upload Icon and Set Raw URL
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -156,14 +151,16 @@ jobs:
           if [ -s ./icon.png ]; then
             echo "Uploading icon.png to release $tag_name..."
             gh release upload "$tag_name" ./icon.png --clobber
-            ICON_URL="https://github.com/${{ github.repository }}/releases/download/$tag_name/icon.png"
-            echo "Uploaded Icon URL: $ICON_URL"
+            
+            # --- התיקון האוטומטי: שימוש בכתובת Raw ישירה במקום קישור Download ---
+            ICON_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/icon.png"
+            echo "Set direct Raw Icon URL: $ICON_URL"
           else
             echo "Warning: icon.png not found or empty."
           fi
           echo "icon_download_url=$ICON_URL" >> $GITHUB_ENV
 
-      - name: Save aurora-app.json into Repository
+      - name: Save aurora-app.json and icon.png into Repository
         run: |
           cat <<EOF > aurora-app.json
           {
@@ -213,7 +210,7 @@ jobs:
               }
             }')
 
-          echo "Sending extracted metadata and icon URL to Aurora Whitelist Dashboard..."
+          echo "Sending extracted metadata with direct Raw Icon URL to Aurora Whitelist Dashboard..."
           curl -s -X POST https://aurora-whitelist-chi.vercel.app/api/register-app \
                -H "Content-Type: application/json" \
                -d "$PAYLOAD"
