@@ -70,10 +70,13 @@ jobs:
           echo "app_label=$APP_LABEL" >> $GITHUB_ENV
           echo "ver_name=$VER_NAME" >> $GITHUB_ENV
 
-      - name: Extract Best Icon from APK (Python)
+      - name: Extract & Auto-Crop Icon (Python)
         run: |
+          pip install pillow --quiet
+
           python3 - << 'EOF'
           import zipfile, re, os
+          from PIL import Image
 
           apk_path = "${{ env.apk_path }}"
           print(f"Inspecting APK at: {apk_path}")
@@ -81,7 +84,7 @@ jobs:
           with zipfile.ZipFile(apk_path, 'r') as z:
               names = z.namelist()
 
-              # חיפוש כל קובצי התמונות (png, webp, jpg) במשאבים
+              # 1. איתור קובצי תמונה במשאבי האפליקציה
               candidates = [n for n in names if re.search(r'^res/(mipmap|drawable).*\.(png|webp|jpg)$', n, re.I)]
               candidates = [n for n in candidates if 'background' not in n.lower()]
 
@@ -90,6 +93,7 @@ jobs:
                   best = candidates
 
               if best:
+                  # דירוג לפי איכות ורזולוציה מקסימלית
                   def priority(name):
                       score = 0
                       if 'xxxhdpi' in name: score += 50
@@ -104,9 +108,41 @@ jobs:
                   chosen = best[0]
                   print(f"Extracting selected icon: {chosen}")
 
-                  # כתיבת התמונה כשה-ZIP פתוח
-                  with open("icon.png", "wb") as f:
+                  with open("temp_raw_icon", "wb") as f:
                       f.write(z.read(chosen))
+
+                  # 2. חיתוך שוליים אוטומטי (Auto-Crop) ומתיחה לגודל חנות מלא
+                  try:
+                      with Image.open("temp_raw_icon") as img:
+                          img = img.convert("RGBA")
+                          alpha = img.split()[-1]
+                          
+                          # סינון שקיפות וצלליות חלשות (שומר רק תוכן עם שקיפות מעל 25)
+                          mask = alpha.point(lambda p: 255 if p > 25 else 0)
+                          bbox = mask.getbbox()
+
+                          if bbox:
+                              cropped = img.crop(bbox)
+                              w, h = cropped.size
+                              max_dim = max(w, h)
+                              
+                              # ריבוע הקנבס ומירכוז
+                              square_img = Image.new("RGBA", (max_dim, max_dim), (0, 0, 0, 0))
+                              square_img.paste(cropped, ((max_dim - w) // 2, (max_dim - h) // 2))
+
+                              # מתיחה ל-512x512 תקני של Google Play
+                              final_icon = square_img.resize((512, 512), Image.Resampling.LANCZOS)
+                              final_icon.save("icon.png", "PNG")
+                              print(f"Auto-crop succeeded! Bounding box: {bbox} -> Resized to 512x512")
+                          else:
+                              img.resize((512, 512), Image.Resampling.LANCZOS).save("icon.png", "PNG")
+                  except Exception as e:
+                      print(f"Image processing error: {e}, falling back to direct save")
+                      os.rename("temp_raw_icon", "icon.png")
+
+                  if os.path.exists("temp_raw_icon"):
+                      os.remove("temp_raw_icon")
+                      
                   print("Saved icon.png successfully!")
               else:
                   print("No suitable icon image found in APK.")
