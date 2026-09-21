@@ -51,11 +51,9 @@ jobs:
 
           BADGING_OUTPUT=$($AAPT_BIN dump badging "$apk_path")
 
-          # חילוץ מדויק של ה-Package Name והגרסה
           PKG_NAME=$(echo "$BADGING_OUTPUT" | grep -m 1 "^package: name=" | awk -F"'" '{print $2}')
           VER_NAME=$(echo "$BADGING_OUTPUT" | grep -m 1 "versionName=" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
           
-          # חילוץ שם האפליקציה (תווית)
           APP_LABEL=$(echo "$BADGING_OUTPUT" | grep -m 1 "^application-label:" | sed -n "s/.*application-label:'\([^']*\)'.*/\1/p")
           if [ -z "$APP_LABEL" ]; then
             APP_LABEL=$(echo "$BADGING_OUTPUT" | grep -m 1 "^application: label=" | sed -n "s/.*label='\([^']*\)'.*/\1/p")
@@ -64,36 +62,70 @@ jobs:
             APP_LABEL="$PKG_NAME"
           fi
 
-          # איתור קובץ אייקון PNG בלבד (מתעלם מקובצי xml)
-          ICON_PATH=$(echo "$BADGING_OUTPUT" | grep -o "res/.*\.png" | sort -V | tail -n 1)
-          if [ -z "$ICON_PATH" ]; then
-            # גיבוי: חיפוש ישיר בתוך ה-APK
-            ICON_PATH=$(unzip -l "$apk_path" | grep -o "res/.*ic_launcher.*\.png" | sort -V | tail -n 1)
-          fi
-
           echo "Extracted Package: $PKG_NAME"
           echo "Extracted Label: $APP_LABEL"
           echo "Extracted Version: $VER_NAME"
-          echo "Extracted Icon Path: $ICON_PATH"
 
           echo "pkg_name=$PKG_NAME" >> $GITHUB_ENV
           echo "app_label=$APP_LABEL" >> $GITHUB_ENV
           echo "ver_name=$VER_NAME" >> $GITHUB_ENV
-          echo "icon_internal_path=$ICON_PATH" >> $GITHUB_ENV
 
-      - name: Extract Icon and Attach to Release
+      - name: Extract Best Icon from APK (Python)
+        run: |
+          python3 - << 'EOF'
+          import zipfile, re, os
+
+          apk_path = "${{ env.apk_path }}"
+          print(f"Inspecting APK at: {apk_path}")
+
+          with zipfile.ZipFile(apk_path, 'r') as z:
+              names = z.namelist()
+
+          # חיפוש כל קובצי התמונות (png, webp, jpg) במשאבים
+          candidates = [n for n in names if re.search(r'^res/(mipmap|drawable).*\.(png|webp|jpg)$', n, re.I)]
+          # סינון קובצי רקע של Adaptive Icons
+          candidates = [n for n in candidates if 'background' not in n.lower()]
+
+          # העדפה לקבצים שמכילים launcher, icon, logo או app
+          best = [n for n in candidates if any(k in n.lower() for k in ['launcher', 'icon', 'logo', 'app'])]
+          if not best:
+              best = candidates
+
+          if best:
+              # דירוג לפי הרזולוציה הגבוהה ביותר
+              def priority(name):
+                  score = 0
+                  if 'xxxhdpi' in name: score += 50
+                  elif 'xxhdpi' in name: score += 40
+                  elif 'xhdpi' in name: score += 30
+                  elif 'hdpi' in name: score += 20
+                  elif 'mdpi' in name: score += 10
+                  if 'foreground' not in name: score += 5
+                  return score
+
+              best.sort(key=priority, reverse=True)
+              chosen = best[0]
+              print(f"Selected best icon: {chosen}")
+
+              with open("icon.png", "wb") as f:
+                  f.write(z.read(chosen))
+              print("Saved icon.png successfully!")
+          else:
+              print("No suitable icon image found in APK.")
+          EOF
+
+      - name: Upload Icon to Release Assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ICON_URL=""
-          if [ -n "$icon_internal_path" ]; then
-            echo "Extracting PNG icon from APK..."
-            unzip -p "$apk_path" "$icon_internal_path" > ./icon.png
-            if [ -s ./icon.png ]; then
-              echo "Icon extracted successfully. Uploading as release asset..."
-              gh release upload "$tag_name" ./icon.png --clobber
-              ICON_URL="https://github.com/${{ github.repository }}/releases/download/$tag_name/icon.png"
-            fi
+          if [ -s ./icon.png ]; then
+            echo "Uploading icon.png to release $tag_name..."
+            gh release upload "$tag_name" ./icon.png --clobber
+            ICON_URL="https://github.com/${{ github.repository }}/releases/download/$tag_name/icon.png"
+            echo "Uploaded Icon URL: $ICON_URL"
+          else
+            echo "Warning: icon.png not found or empty."
           fi
           echo "icon_download_url=$ICON_URL" >> $GITHUB_ENV
 
@@ -147,7 +179,7 @@ jobs:
               }
             }')
 
-          echo "Sending extracted metadata to Aurora Whitelist Dashboard..."
+          echo "Sending extracted metadata and icon URL to Aurora Whitelist Dashboard..."
           curl -s -X POST https://aurora-whitelist-chi.vercel.app/api/register-app \
                -H "Content-Type: application/json" \
                -d "$PAYLOAD"
