@@ -114,19 +114,16 @@ jobs:
                           img = img.convert("RGBA")
                           alpha = img.split()[-1]
                           
-                          # סינון קפדני: מתעלם לחלוטין מצלליות חלשות (שומר רק תוכן מוצק מעל 200)
+                          # סינון קפדני: מתעלם לחלוטין מצלליות חלשות
                           mask = alpha.point(lambda p: 255 if p > 200 else 0)
                           bbox = mask.getbbox()
 
-                          # גיבוי אם התמונה אינה מוצקת לגמרי
                           if not bbox:
                               mask = alpha.point(lambda p: 255 if p > 60 else 0)
                               bbox = mask.getbbox()
 
                           if bbox:
                               cropped = img.crop(bbox)
-                              
-                              # מתיחה ישירה לגודל 512x512 מלא ללא שוליים
                               final_icon = cropped.resize((512, 512), Image.Resampling.LANCZOS)
                               final_icon.save("icon.png", "PNG")
                               print(f"Tight crop succeeded! Bbox: {bbox} -> Resized to full 512x512")
@@ -153,7 +150,6 @@ jobs:
             echo "Uploading icon.png to release $tag_name..."
             gh release upload "$tag_name" ./icon.png --clobber
             
-            # --- התיקון האוטומטי: שימוש בכתובת Raw ישירה במקום קישור Download ---
             ICON_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/icon.png"
             echo "Set direct Raw Icon URL: $ICON_URL"
           else
@@ -161,18 +157,38 @@ jobs:
           fi
           echo "icon_download_url=$ICON_URL" >> $GITHUB_ENV
 
-      - name: Save aurora-app.json and icon.png into Repository
+      - name: Generate aurora-app.json and Save to Repository
         run: |
-          cat <<EOF > aurora-app.json
-          {
-            "packageName": "$pkg_name",
-            "name": "$app_label",
-            "name_en": "$app_label",
-            "category": "כלים",
-            "description": "אפליקציה עצמאית שהועלתה לחנות",
-            "author": "${{ github.repository_owner }}"
-          }
-          EOF
+          AI_PROMPT_INSTRUCTION="הנחיה ל-AI: אנא צור תיאור קצר, תמציתי ומדויק בעברית (2-3 משפטים) עבור אפליקציה זו בהתבסס על שמה ומזהה החבילה שלה."
+          
+          # אם הקובץ קיים וכבר עודכן ע"י בינה אחרת - נשמור על התיאור, אחרת נשים את ההנחיה
+          if [ -f aurora-app.json ]; then
+            CURRENT_DESC=$(jq -r '.description // empty' aurora-app.json)
+            if [ -z "$CURRENT_DESC" ] || [ "$CURRENT_DESC" = "null" ]; then
+              FINAL_DESC="$AI_PROMPT_INSTRUCTION"
+            else
+              FINAL_DESC="$CURRENT_DESC"
+            fi
+            FINAL_CAT=$(jq -r '.category // ""' aurora-app.json)
+          else
+            FINAL_DESC="$AI_PROMPT_INSTRUCTION"
+            FINAL_CAT=""
+          fi
+
+          jq -n \
+            --arg pkg "$pkg_name" \
+            --arg name "$app_label" \
+            --arg desc "$FINAL_DESC" \
+            --arg cat "$FINAL_CAT" \
+            --arg author "${{ github.repository_owner }}" \
+            '{
+              packageName: $pkg,
+              name: $name,
+              name_en: $name,
+              category: $cat,
+              description: $desc,
+              author: $author
+            }' > aurora-app.json
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -180,7 +196,7 @@ jobs:
           if [ -f icon.png ]; then
             git add icon.png
           fi
-          git commit -m "Auto-generate aurora-app.json and icon from APK" || echo "No changes to commit"
+          git commit -m "Auto-generate aurora-app.json with AI prompt and icon from APK" || echo "No changes to commit"
           git push origin main || echo "Push skipped"
 
       - name: Notify Aurora Whitelist Dashboard
@@ -188,6 +204,9 @@ jobs:
           APK_NAME=$(basename "$apk_path")
           APK_SIZE=$(stat -c%s "$apk_path")
           DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/$tag_name/$APK_NAME"
+
+          APP_DESC=$(jq -r '.description // ""' aurora-app.json)
+          APP_CAT=$(jq -r '.category // ""' aurora-app.json)
 
           PAYLOAD=$(jq -n \
             --arg repo "${{ github.repository }}" \
@@ -197,6 +216,8 @@ jobs:
             --arg iconUrl "${{ env.icon_download_url }}" \
             --arg pkg "${{ env.pkg_name }}" \
             --arg name "${{ env.app_label }}" \
+            --arg cat "$APP_CAT" \
+            --arg desc "$APP_DESC" \
             '{
               repo: $repo,
               version: $version,
@@ -206,12 +227,12 @@ jobs:
               manifest: {
                 packageName: $pkg,
                 name: $name,
-                category: "כלים",
-                description: "אפליקציה עצמאית שהועלתה לחנות"
+                category: $cat,
+                description: $desc
               }
             }')
 
-          echo "Sending extracted metadata with direct Raw Icon URL to Aurora Whitelist Dashboard..."
+          echo "Sending extracted metadata with AI instruction prompt to Aurora Whitelist Dashboard..."
           curl -s -X POST https://aurora-whitelist-chi.vercel.app/api/register-app \
                -H "Content-Type: application/json" \
                -d "$PAYLOAD"
