@@ -1,4 +1,76 @@
-- name: Extract & Auto-Crop Icon (Python)
+name: Auto-Extract & Register APK
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  inspect-and-register:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve Release Tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="${{ github.event.release.tag_name }}"
+          if [ -z "$TAG_NAME" ]; then
+            echo "Tag name not in event, fetching latest release tag..."
+            TAG_NAME=$(gh release view --json tagName -q .tagName)
+          fi
+          echo "Using release tag: $TAG_NAME"
+          echo "tag_name=$TAG_NAME" >> $GITHUB_ENV
+
+      - name: Download Release APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Fetching APK from release $tag_name..."
+          gh release download "$tag_name" --pattern "*.apk" --dir ./incoming_apk/
+          APK_PATH=$(find ./incoming_apk -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "Error: No APK file found in this release!"
+            exit 1
+          fi
+          echo "apk_path=$APK_PATH" >> $GITHUB_ENV
+          echo "Found APK: $APK_PATH"
+
+      - name: Extract Metadata with AAPT
+        run: |
+          AAPT_BIN=$(find $ANDROID_HOME/build-tools -name aapt | sort -V | tail -n 1)
+          echo "Using AAPT at: $AAPT_BIN"
+
+          BADGING_OUTPUT=$($AAPT_BIN dump badging "$apk_path")
+
+          PKG_NAME=$(echo "$BADGING_OUTPUT" | grep -m 1 "^package: name=" | awk -F"'" '{print $2}')
+          VER_NAME=$(echo "$BADGING_OUTPUT" | grep -m 1 "versionName=" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
+          
+          APP_LABEL=$(echo "$BADGING_OUTPUT" | grep -m 1 "^application-label:" | sed -n "s/.*application-label:'\([^']*\)'.*/\1/p")
+          if [ -z "$APP_LABEL" ]; then
+            APP_LABEL=$(echo "$BADGING_OUTPUT" | grep -m 1 "^application: label=" | sed -n "s/.*label='\([^']*\)'.*/\1/p")
+          fi
+          if [ -z "$APP_LABEL" ]; then
+            APP_LABEL="$PKG_NAME"
+          fi
+
+          echo "Extracted Package: $PKG_NAME"
+          echo "Extracted Label: $APP_LABEL"
+          echo "Extracted Version: $VER_NAME"
+
+          echo "pkg_name=$PKG_NAME" >> $GITHUB_ENV
+          echo "app_label=$APP_LABEL" >> $GITHUB_ENV
+          echo "ver_name=$VER_NAME" >> $GITHUB_ENV
+
+      - name: Extract & Auto-Crop Icon (Python)
         run: |
           pip install pillow --quiet
 
@@ -71,3 +143,78 @@
               else:
                   print("No suitable icon image found in APK.")
           EOF
+
+      - name: Upload Icon and Set Raw URL
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ICON_URL=""
+          if [ -s ./icon.png ]; then
+            echo "Uploading icon.png to release $tag_name..."
+            gh release upload "$tag_name" ./icon.png --clobber
+            
+            # --- התיקון האוטומטי: שימוש בכתובת Raw ישירה במקום קישור Download ---
+            ICON_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/icon.png"
+            echo "Set direct Raw Icon URL: $ICON_URL"
+          else
+            echo "Warning: icon.png not found or empty."
+          fi
+          echo "icon_download_url=$ICON_URL" >> $GITHUB_ENV
+
+      - name: Save aurora-app.json and icon.png into Repository
+        run: |
+          cat <<EOF > aurora-app.json
+          {
+            "packageName": "$pkg_name",
+            "name": "$app_label",
+            "name_en": "$app_label",
+            "category": "כלים",
+            "description": "אפליקציה עצמאית שהועלתה לחנות",
+            "author": "${{ github.repository_owner }}"
+          }
+          EOF
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add aurora-app.json
+          if [ -f icon.png ]; then
+            git add icon.png
+          fi
+          git commit -m "Auto-generate aurora-app.json and icon from APK" || echo "No changes to commit"
+          git push origin main || echo "Push skipped"
+
+      - name: Notify Aurora Whitelist Dashboard
+        run: |
+          APK_NAME=$(basename "$apk_path")
+          APK_SIZE=$(stat -c%s "$apk_path")
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/$tag_name/$APK_NAME"
+
+          PAYLOAD=$(jq -n \
+            --arg repo "${{ github.repository }}" \
+            --arg version "${{ env.ver_name }}" \
+            --arg apkUrl "$DOWNLOAD_URL" \
+            --argjson apkSize "$APK_SIZE" \
+            --arg iconUrl "${{ env.icon_download_url }}" \
+            --arg pkg "${{ env.pkg_name }}" \
+            --arg name "${{ env.app_label }}" \
+            '{
+              repo: $repo,
+              version: $version,
+              apkUrl: $apkUrl,
+              apkSize: $apkSize,
+              iconUrl: $iconUrl,
+              manifest: {
+                packageName: $pkg,
+                name: $name,
+                category: "כלים",
+                description: "אפליקציה עצמאית שהועלתה לחנות"
+              }
+            }')
+
+          echo "Sending extracted metadata with direct Raw Icon URL to Aurora Whitelist Dashboard..."
+          curl -s -X POST https://aurora-whitelist-chi.vercel.app/api/register-app \
+               -H "Content-Type: application/json" \
+               -d "$PAYLOAD"
+          
+          echo ""
+          echo "Registration completed successfully!"
