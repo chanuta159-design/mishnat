@@ -81,37 +81,35 @@ jobs:
           with zipfile.ZipFile(apk_path, 'r') as z:
               names = z.namelist()
 
-          # חיפוש כל קובצי התמונות (png, webp, jpg) במשאבים
-          candidates = [n for n in names if re.search(r'^res/(mipmap|drawable).*\.(png|webp|jpg)$', n, re.I)]
-          # סינון קובצי רקע של Adaptive Icons
-          candidates = [n for n in candidates if 'background' not in n.lower()]
+              # חיפוש כל קובצי התמונות (png, webp, jpg) במשאבים
+              candidates = [n for n in names if re.search(r'^res/(mipmap|drawable).*\.(png|webp|jpg)$', n, re.I)]
+              candidates = [n for n in candidates if 'background' not in n.lower()]
 
-          # העדפה לקבצים שמכילים launcher, icon, logo או app
-          best = [n for n in candidates if any(k in n.lower() for k in ['launcher', 'icon', 'logo', 'app'])]
-          if not best:
-              best = candidates
+              best = [n for n in candidates if any(k in n.lower() for k in ['launcher', 'icon', 'logo', 'app'])]
+              if not best:
+                  best = candidates
 
-          if best:
-              # דירוג לפי הרזולוציה הגבוהה ביותר
-              def priority(name):
-                  score = 0
-                  if 'xxxhdpi' in name: score += 50
-                  elif 'xxhdpi' in name: score += 40
-                  elif 'xhdpi' in name: score += 30
-                  elif 'hdpi' in name: score += 20
-                  elif 'mdpi' in name: score += 10
-                  if 'foreground' not in name: score += 5
-                  return score
+              if best:
+                  def priority(name):
+                      score = 0
+                      if 'xxxhdpi' in name: score += 50
+                      elif 'xxhdpi' in name: score += 40
+                      elif 'xhdpi' in name: score += 30
+                      elif 'hdpi' in name: score += 20
+                      elif 'mdpi' in name: score += 10
+                      if 'foreground' not in name: score += 5
+                      return score
 
-              best.sort(key=priority, reverse=True)
-              chosen = best[0]
-              print(f"Selected best icon: {chosen}")
+                  best.sort(key=priority, reverse=True)
+                  chosen = best[0]
+                  print(f"Extracting selected icon: {chosen}")
 
-              with open("icon.png", "wb") as f:
-                  f.write(z.read(chosen))
-              print("Saved icon.png successfully!")
-          else:
-              print("No suitable icon image found in APK.")
+                  # כתיבת התמונה כשה-ZIP פתוח
+                  with open("icon.png", "wb") as f:
+                      f.write(z.read(chosen))
+                  print("Saved icon.png successfully!")
+              else:
+                  print("No suitable icon image found in APK.")
           EOF
 
       - name: Upload Icon to Release Assets
